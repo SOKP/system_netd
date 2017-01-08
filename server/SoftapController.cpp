@@ -34,16 +34,16 @@
 #include <openssl/sha.h>
 
 #define LOG_TAG "SoftapController"
-#include <base/file.h>
-#include <base/stringprintf.h>
+#include <android-base/file.h>
+#include <android-base/stringprintf.h>
 #include <cutils/log.h>
 #include <netutils/ifc.h>
 #include <private/android_filesystem_config.h>
 #include "wifi.h"
-#include "wifi_fst.h"
 #include "ResponseCode.h"
 
 #include "SoftapController.h"
+#include <dirent.h>
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
@@ -55,17 +55,15 @@ using android::base::WriteStringToFile;
 
 #ifdef LIBWPA_CLIENT_EXISTS
 static const char HOSTAPD_UNIX_FILE[]    = "/data/misc/wifi/hostapd/wlan0";
-static const char HOSTAPD_SOCKETS_DIR[]    = "/data/misc/wifi/sockets";
 static const char HOSTAPD_DHCP_DIR[]    = "/data/misc/dhcp";
 #endif
 static const char HOSTAPD_CONF_FILE[]    = "/data/misc/wifi/hostapd.conf";
 static const char HOSTAPD_BIN_FILE[]    = "/system/bin/hostapd";
+static const char HOSTAPD_SOCKETS_DIR[]    = "/data/misc/wifi/sockets";
 static const char WIFI_HOSTAPD_GLOBAL_CTRL_IFACE[] = "/data/misc/wifi/hostapd/global";
 
-SoftapController::SoftapController(SocketListener *sl)
-    : mPid(0) {
-    mSpsl = sl;
-}
+SoftapController::SoftapController()
+    : mPid(0) {}
 
 SoftapController::~SoftapController() {
 }
@@ -135,7 +133,7 @@ void *SoftapController::threadStart(void *obj){
                 ALOGD("Get event from hostapd (%s)", buf);
                 memset(dest_str, 0x0, sizeof(dest_str));
                 snprintf(dest_str, sizeof(dest_str), "IfaceMessage active %s", buf);
-                me->mSpsl->sendBroadcast(ResponseCode::InterfaceMessage, dest_str, false);
+                me->mSocketClient->sendMsg(ResponseCode::InterfaceMessage, dest_str, false);
             } else {
                 break;
             }
@@ -154,8 +152,9 @@ void *SoftapController::threadStart(void *obj){
 }
 #endif
 
-int SoftapController::startSoftap() {
+int SoftapController::startSoftap(bool global_ctrl_iface = false, SocketClient *socketClient = NULL) {
     pid_t pid = 1;
+    DIR *dir = NULL;
     int ret;
 
     if (mPid) {
@@ -167,21 +166,14 @@ int SoftapController::startSoftap() {
         ALOGE("Wi-Fi entropy file was not created");
     }
 
-    ret = wifi_start_fstman(true);
-    if (ret) {
-        return ResponseCode::ServiceStartFailed;
-    }
-
     if ((pid = fork()) < 0) {
         ALOGE("fork failed (%s)", strerror(errno));
-        wifi_stop_fstman(true);
         return ResponseCode::ServiceStartFailed;
     }
 
     if (!pid) {
         ensure_entropy_file_exists();
-        if (is_fst_softap_enabled()) {
-            /* fstman needs hostapd global control interface */
+        if (global_ctrl_iface) {
             ret = execl(HOSTAPD_BIN_FILE, HOSTAPD_BIN_FILE,
                         "-e", WIFI_ENTROPY_FILE, "-ddd",
                         "-g", WIFI_HOSTAPD_GLOBAL_CTRL_IFACE,
@@ -195,13 +187,27 @@ int SoftapController::startSoftap() {
             ALOGE("execl failed (%s)", strerror(errno));
         }
         ALOGE("SoftAP failed to start");
-        wifi_stop_fstman(true);
         return ResponseCode::ServiceStartFailed;
     } else {
         mPid = pid;
         ALOGD("SoftAP started successfully");
         usleep(AP_BSS_START_DELAY);
+        dir = opendir(HOSTAPD_SOCKETS_DIR);
+        if (NULL == dir && errno == ENOENT) {
+            mkdir(HOSTAPD_SOCKETS_DIR, S_IRWXU|S_IRWXG|S_IRWXO);
+            chown(HOSTAPD_SOCKETS_DIR, AID_WIFI, AID_WIFI);
+            chmod(HOSTAPD_SOCKETS_DIR, S_IRWXU|S_IRWXG);
+        } else {
+            if (dir != NULL) { /* Directory already exists */
+                ALOGD("%s already exists", HOSTAPD_SOCKETS_DIR);
+                closedir(dir);
+            }
+            if (errno == EACCES) {
+                ALOGE("Cant open %s , check permissions ", HOSTAPD_SOCKETS_DIR);
+            }
+        }
 #ifdef LIBWPA_CLIENT_EXISTS
+        mSocketClient = socketClient;
         mHostapdFlag = true;
         if ((mThreadErr = pthread_create(&mThread, NULL, SoftapController::threadStart, this)) != 0) {
             ALOGE("pthread_create failed for hostapd listen socket (%s)", strerror(errno));
@@ -231,7 +237,6 @@ int SoftapController::stopSoftap() {
 
     mPid = 0;
     ALOGD("SoftAP stopped successfully");
-    wifi_stop_fstman(true);
     usleep(AP_BSS_STOP_DELAY);
     return ResponseCode::SoftapStatusResult;
 }
@@ -283,10 +288,14 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     if (argc > 7) {
         char psk_str[2*SHA256_DIGEST_LENGTH+1];
         if (!strcmp(argv[6], "wpa-psk")) {
-            generatePsk(argv[3], argv[7], psk_str);
+            if (!generatePsk(argv[3], argv[7], psk_str)) {
+                return ResponseCode::OperationFailed;
+            }
             fbuf = StringPrintf("%swpa=3\nwpa_pairwise=TKIP CCMP\nwpa_psk=%s\n", wbuf.c_str(), psk_str);
         } else if (!strcmp(argv[6], "wpa2-psk")) {
-            generatePsk(argv[3], argv[7], psk_str);
+            if (!generatePsk(argv[3], argv[7], psk_str)) {
+                return ResponseCode::OperationFailed;
+            }
             fbuf = StringPrintf("%swpa=2\nrsn_pairwise=CCMP\nwpa_psk=%s\n", wbuf.c_str(), psk_str);
         } else if (!strcmp(argv[6], "open")) {
             fbuf = wbuf;
@@ -326,9 +335,13 @@ int SoftapController::fwReloadSoftap(int argc, char *argv[])
         fwpath = (char *)wifi_get_fw_path(WIFI_GET_FW_PATH_P2P);
     } else if (strcmp(argv[3], "STA") == 0) {
         fwpath = (char *)wifi_get_fw_path(WIFI_GET_FW_PATH_STA);
-    }
-    if (!fwpath)
+    } else {
         return ResponseCode::CommandParameterError;
+    }
+    if (!fwpath) {
+        ALOGE("Softap fwReload - NULL path for %s", argv[3]);
+        return ResponseCode::SoftapStatusResult;
+    }
     if (wifi_change_fw_path((const char *)fwpath)) {
         ALOGE("Softap fwReload failed");
         return ResponseCode::OperationFailed;
@@ -339,14 +352,21 @@ int SoftapController::fwReloadSoftap(int argc, char *argv[])
     return ResponseCode::SoftapStatusResult;
 }
 
-void SoftapController::generatePsk(char *ssid, char *passphrase, char *psk_str) {
+bool SoftapController::generatePsk(char *ssid, char *passphrase, char *psk_str) {
     unsigned char psk[SHA256_DIGEST_LENGTH];
-    int j;
+
     // Use the PKCS#5 PBKDF2 with 4096 iterations
-    PKCS5_PBKDF2_HMAC_SHA1(passphrase, strlen(passphrase),
-            reinterpret_cast<const unsigned char *>(ssid), strlen(ssid),
-            4096, SHA256_DIGEST_LENGTH, psk);
-    for (j=0; j < SHA256_DIGEST_LENGTH; j++) {
+    if (PKCS5_PBKDF2_HMAC_SHA1(passphrase, strlen(passphrase),
+                               reinterpret_cast<const unsigned char *>(ssid),
+                               strlen(ssid), 4096, SHA256_DIGEST_LENGTH,
+                               psk) != 1) {
+        ALOGE("Cannot generate PSK using PKCS#5 PBKDF2");
+        return false;
+    }
+
+    for (int j=0; j < SHA256_DIGEST_LENGTH; j++) {
         sprintf(&psk_str[j*2], "%02x", psk[j]);
     }
+
+    return true;
 }

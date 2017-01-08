@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2015, The Linux Foundation. All rights reserved.
+   Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
@@ -32,6 +32,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LOG_TAG "QtiConnectivityAdapter"
 
 #include <cutils/log.h>
+#include <cutils/properties.h>
 #include <dlfcn.h>
 #include <sysutils/SocketClient.h>
 #include <sysutils/SocketListener.h>
@@ -40,6 +41,10 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "NetdCommand.h"
 #include "QtiConnectivityAdapter.h"
 #include "ResponseCode.h"
+
+#ifdef USE_WRAPPER
+#include "codeaurora/PropClientDispatch.h"
+#endif
 
 void *_libConnectivityHandle = NULL;
 void (*_initExtension) (SocketListener*) = NULL;
@@ -95,15 +100,47 @@ int getV6TetherStats
 ) {
     ALOGI("getV6TetherStats(tether=%s upstream=%s)", tetherIface, upstreamIface);
     if (_getV6TetherStats) return _getV6TetherStats(cli,
-                                                        tetherIface,
-                                                        upstreamIface,
-                                                        extraProcessingInfo);
+                                                    tetherIface,
+                                                    upstreamIface,
+                                                    extraProcessingInfo);
     return 0;
 }
 
 NetdCommand *QtiConnectivityCommand::asNetdCommand() {
     return static_cast<NetdCommand*>(this);
 }
+
+#ifdef USE_WRAPPER
+int connAdapterGetHostByName(const pid_t pid, const uid_t uid, const gid_t gid, const char* name) {
+    if( __propClientDispatch.propGetHostByNameForNet ) {
+        return __propClientDispatch.propGetHostByNameForNet(pid, uid, gid, name);
+    } else {
+        return -1;
+    }
+}
+
+int connAdapterGetHostByAddr(const pid_t pid, const uid_t uid, const gid_t gid, const void* addr) {
+    if( __propClientDispatch.propGetHostByAddrForNet ) {
+        return __propClientDispatch.propGetHostByAddrForNet(pid, uid, gid, addr);
+    } else {
+        return -1;
+    }
+}
+
+int connAdapterGetAddrInfo( const pid_t pid, const uid_t uid, const gid_t gid, const char* hostname, const struct addrinfo* hints) {
+    if ( __propClientDispatch.propGetAddrInfoForNet ) {
+        return __propClientDispatch.propGetAddrInfoForNet(pid, uid, gid, hostname, hints);
+    } else {
+        return -1;
+    }
+}
+
+void connAdapterSendDnsReport( const int latencyMs ) {
+    if( __propClientDispatch.propSendDnsReport ) {
+        __propClientDispatch.propSendDnsReport(latencyMs);
+    }
+}
+#endif
 
 int QtiConnectivityCommand::runCommand
 (

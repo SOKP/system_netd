@@ -14,6 +14,29 @@
 
 LOCAL_PATH := $(call my-dir)
 
+###
+### netd service AIDL interface.
+###
+include $(CLEAR_VARS)
+
+LOCAL_CFLAGS := -Wall -Werror
+LOCAL_CLANG := true
+LOCAL_MODULE := libnetdaidl
+LOCAL_SHARED_LIBRARIES := \
+        libbinder \
+        libutils
+LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/binder
+LOCAL_AIDL_INCLUDES := $(LOCAL_PATH)/binder
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/binder
+LOCAL_SRC_FILES := \
+        binder/android/net/INetd.aidl \
+        binder/android/net/UidRange.cpp
+
+include $(BUILD_SHARED_LIBRARY)
+
+###
+### netd daemon.
+###
 include $(CLEAR_VARS)
 
 LOCAL_C_INCLUDES := \
@@ -24,9 +47,17 @@ LOCAL_C_INCLUDES := \
 
 LOCAL_CLANG := true
 LOCAL_CPPFLAGS := -std=c++11 -Wall -Werror
+
+ifeq ($(BOARD_USES_LIBC_WRAPPER),true)
+LOCAL_CPPFLAGS += -DUSE_WRAPPER
+endif
+
 LOCAL_MODULE := netd
 
+LOCAL_INIT_RC := netd.rc
+
 LOCAL_SHARED_LIBRARIES := \
+        libbinder \
         libcrypto \
         libcutils \
         libdl \
@@ -34,6 +65,7 @@ LOCAL_SHARED_LIBRARIES := \
         liblog \
         liblogwrap \
         libmdnssd \
+        libnetdaidl \
         libnetutils \
         libnl \
         libsysutils \
@@ -47,8 +79,10 @@ LOCAL_SRC_FILES := \
         BandwidthController.cpp \
         ClatdController.cpp \
         CommandListener.cpp \
+        Controllers.cpp \
         DnsProxyListener.cpp \
         DummyNetwork.cpp \
+        DumpWriter.cpp \
         FirewallController.cpp \
         FwmarkServer.cpp \
         IdletimerController.cpp \
@@ -58,6 +92,7 @@ LOCAL_SRC_FILES := \
         NatController.cpp \
         NetdCommand.cpp \
         NetdConstants.cpp \
+        NetdNativeService.cpp \
         NetlinkHandler.cpp \
         NetlinkManager.cpp \
         Network.cpp \
@@ -67,6 +102,7 @@ LOCAL_SRC_FILES := \
         QtiConnectivityAdapter.cpp \
         ResolverController.cpp \
         RouteController.cpp \
+        SockDiag.cpp \
         SoftapController.cpp \
         StrictController.cpp \
         TetherController.cpp \
@@ -74,23 +110,29 @@ LOCAL_SRC_FILES := \
         VirtualNetwork.cpp \
         main.cpp \
         oem_iptables_hook.cpp \
+        binder/android/net/metrics/IDnsEventListener.aidl \
         QtiDataController.cpp \
+
+LOCAL_AIDL_INCLUDES := $(LOCAL_PATH)/binder
+
+ifeq ($(BOARD_HAS_QCOM_WLAN), true)
+  LOCAL_CFLAGS += -DQSAP_WLAN
+  LOCAL_SHARED_LIBRARIES += libqsap_sdk
+  LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/sdk/softap/include
+endif
 
 ifdef WPA_SUPPLICANT_VERSION
   LOCAL_CFLAGS += -DLIBWPA_CLIENT_EXISTS
   LOCAL_SHARED_LIBRARIES += libwpa_client
   LOCAL_C_INCLUDES += external/wpa_supplicant_8/src/common
 endif
-ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
-ifeq ($(BOARD_HAS_QCOM_WLAN), true)
-  LOCAL_CFLAGS += -DQSAP_WLAN
-  LOCAL_SHARED_LIBRARIES += libqsap_sdk
-  LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/sdk/softap/include
-endif
-endif
 
 include $(BUILD_EXECUTABLE)
 
+
+###
+### ndc binary.
+###
 include $(CLEAR_VARS)
 
 LOCAL_CFLAGS := -Wall -Werror
@@ -100,3 +142,23 @@ LOCAL_SHARED_LIBRARIES := libcutils
 LOCAL_SRC_FILES := ndc.c
 
 include $(BUILD_EXECUTABLE)
+
+###
+### netd unit tests.
+###
+include $(CLEAR_VARS)
+LOCAL_MODULE := netd_unit_test
+LOCAL_CFLAGS := -Wall -Werror -Wunused-parameter
+LOCAL_C_INCLUDES := system/netd/server system/netd/server/binder system/core/logwrapper/include system/netd/include
+LOCAL_SRC_FILES := \
+        NetdConstants.cpp IptablesBaseTest.cpp \
+        BandwidthController.cpp BandwidthControllerTest.cpp \
+        FirewallControllerTest.cpp FirewallController.cpp \
+        SockDiagTest.cpp SockDiag.cpp \
+        StrictController.cpp StrictControllerTest.cpp \
+        UidRanges.cpp \
+
+LOCAL_MODULE_TAGS := tests
+LOCAL_SHARED_LIBRARIES := liblog libbase libcutils liblogwrap
+include $(BUILD_NATIVE_TEST)
+
